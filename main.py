@@ -2,11 +2,14 @@
 Main FastAPI application.
 """
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+import httpx
 
 from app.core.config import settings
 from app.core.database import Base, engine
@@ -74,12 +77,55 @@ from app.models.auth import (
     PrintingPermission,
 )
 
+# Health check URL for Render service
+RENDER_HEALTH_URL = "https://ims-backend-ts4y.onrender.com/health"
+HEALTH_CHECK_INTERVAL = 300  # 5 minutes in seconds
+
+logger = logging.getLogger(__name__)
+
+
+async def health_check_task():
+    """Background task to ping health endpoint every 5 minutes to keep Render service alive."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        while True:
+            try:
+                response = await client.get(RENDER_HEALTH_URL)
+                if response.status_code == 200:
+                    logger.info(f"Health check successful: {RENDER_HEALTH_URL}")
+                else:
+                    logger.warning(f"Health check returned status {response.status_code}: {RENDER_HEALTH_URL}")
+            except Exception as e:
+                logger.error(f"Health check failed: {str(e)}")
+            
+            # Wait 5 minutes before next check
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    # Startup: Start background health check task
+    logger.info("Starting health check background task...")
+    health_task = asyncio.create_task(health_check_task())
+    
+    yield
+    
+    # Shutdown: Cancel background task
+    logger.info("Stopping health check background task...")
+    health_task.cancel()
+    try:
+        await health_task
+    except asyncio.CancelledError:
+        pass
+
+
 # Create FastAPI app
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="Candor Foods Inventory Management System API",
     debug=settings.debug,
+    lifespan=lifespan,
 )
 
 # Add middleware to block invalid requests (must be first)
