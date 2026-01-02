@@ -86,16 +86,51 @@ logger = logging.getLogger(__name__)
 
 async def health_check_task():
     """Background task to ping health endpoint every 5 minutes to keep Render service alive."""
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    # Wait 30 seconds after startup before first check (give service time to fully start)
+    await asyncio.sleep(30)
+    
+    # Create HTTP client with appropriate timeout and SSL settings
+    timeout = httpx.Timeout(30.0, connect=10.0)  # 30s total, 10s connect
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        verify=True,  # SSL verification
+        follow_redirects=True
+    ) as client:
         while True:
             try:
+                logger.debug(f"Sending health check to: {RENDER_HEALTH_URL}")
                 response = await client.get(RENDER_HEALTH_URL)
+                
                 if response.status_code == 200:
-                    logger.info(f"Health check successful: {RENDER_HEALTH_URL}")
+                    logger.info(f"✓ Health check successful: {RENDER_HEALTH_URL} (Status: {response.status_code})")
                 else:
-                    logger.warning(f"Health check returned status {response.status_code}: {RENDER_HEALTH_URL}")
+                    logger.warning(
+                        f"⚠ Health check returned non-200 status: {RENDER_HEALTH_URL} "
+                        f"(Status: {response.status_code}, Response: {response.text[:200]})"
+                    )
+                    
+            except httpx.TimeoutException as e:
+                logger.error(
+                    f"✗ Health check timeout: {RENDER_HEALTH_URL} - "
+                    f"Request timed out after {timeout.read} seconds. Error: {str(e)}"
+                )
+            except httpx.ConnectError as e:
+                logger.error(
+                    f"✗ Health check connection error: {RENDER_HEALTH_URL} - "
+                    f"Could not connect to server. Error: {str(e)}"
+                )
+            except httpx.HTTPError as e:
+                logger.error(
+                    f"✗ Health check HTTP error: {RENDER_HEALTH_URL} - "
+                    f"HTTP error occurred. Error: {str(e)}"
+                )
             except Exception as e:
-                logger.error(f"Health check failed: {str(e)}")
+                logger.error(
+                    f"✗ Health check failed: {RENDER_HEALTH_URL} - "
+                    f"Unexpected error: {type(e).__name__}: {str(e)}"
+                )
+                import traceback
+                logger.debug(f"Traceback: {traceback.format_exc()}")
             
             # Wait 5 minutes before next check
             await asyncio.sleep(HEALTH_CHECK_INTERVAL)
